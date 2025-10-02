@@ -50,15 +50,30 @@ function fresh (reqHeaders, resHeaders) {
 
   // if-none-match takes precedent over if-modified-since
   if (noneMatch) {
+    // Fast path: handle wildcard
     if (noneMatch === '*') {
       return true
     }
-    var etag = resHeaders.etag
 
+    var etag = resHeaders.etag
     if (!etag) {
       return false
     }
 
+    // Fast path: check for exact match before parsing
+    // This handles the common single ETag case efficiently
+    if (noneMatch === etag || noneMatch === 'W/' + etag || 'W/' + noneMatch === etag) {
+      return true
+    }
+
+    // Fast path: check if it's a simple quoted string (most common case)
+    // If there's no comma, we know it's a single token
+    if (noneMatch.indexOf(',') === -1) {
+      // Already checked exact match above, so if no comma, it's a mismatch
+      return false
+    }
+
+    // Slow path: parse multiple ETags
     var matches = parseTokenList(noneMatch)
     for (var i = 0; i < matches.length; i++) {
       var match = matches[i]
@@ -73,9 +88,19 @@ function fresh (reqHeaders, resHeaders) {
   // if-modified-since
   if (modifiedSince) {
     var lastModified = resHeaders['last-modified']
-    var modifiedStale = !lastModified || !(parseHttpDate(lastModified) <= parseHttpDate(modifiedSince))
 
-    if (modifiedStale) {
+    // Early exit: missing last-modified means stale
+    if (!lastModified) {
+      return false
+    }
+
+    // Parse dates once and compare
+    var lastModifiedTime = parseHttpDate(lastModified)
+    var modifiedSinceTime = parseHttpDate(modifiedSince)
+
+    // If either date is invalid (NaN), it's stale
+    // If resource is newer (lastModified > modifiedSince), it's stale
+    if (isNaN(lastModifiedTime) || isNaN(modifiedSinceTime) || lastModifiedTime > modifiedSinceTime) {
       return false
     }
   }
@@ -110,27 +135,29 @@ function parseTokenList (str) {
   var end = 0
   var list = []
   var start = 0
+  var len = str.length
 
   // gather tokens
-  for (var i = 0, len = str.length; i < len; i++) {
-    switch (str.charCodeAt(i)) {
-      case 0x20: /*   */
-        if (start === end) {
-          start = end = i + 1
-        }
-        break
-      case 0x2c: /* , */
-        list.push(str.substring(start, end))
+  for (var i = 0; i < len; i++) {
+    var code = str.charCodeAt(i)
+    if (code === 0x20) { /*   */
+      if (start === end) {
         start = end = i + 1
-        break
-      default:
-        end = i + 1
-        break
+      }
+    } else if (code === 0x2c) { /* , */
+      if (end > start) {
+        list.push(str.substring(start, end))
+      }
+      start = end = i + 1
+    } else {
+      end = i + 1
     }
   }
 
   // final token
-  list.push(str.substring(start, end))
+  if (end > start) {
+    list.push(str.substring(start, end))
+  }
 
   return list
 }
